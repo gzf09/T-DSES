@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/inklabsfoundation/inkchain/core/chaincode/shim"
 	pb "github.com/inklabsfoundation/inkchain/protos/peer"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -15,6 +16,8 @@ import (
 const (
 	IncentiveMashupInvoke = "10"
 	FeeBalanceType        = "TOKENS"
+	L                     = 2
+	R                     = 1
 )
 
 // Definitions of a service's status
@@ -75,12 +78,15 @@ type user struct {
 	// There is a one-to-one correspondence between "Name" and "Address"
 	// The Address records the user's profit from creating valuable services or mashups.
 
-	Contribution int `json:"contribution"`
+	Contribution float64 `json:"contribution"`
 	// "Contribution" evaluates the user's contribution to the service ecosystem.
 	// TODO: add handler about "Contribution"
 	// Benefit of "Contribution":
 	// 1. construct a evaluation for every user's contribution on the service ecosystem
 	// 2. inspire users to participate in creating new services and mashups
+	TotalService     int `json:"totalService"`
+	TotalCallTimes   int `json:"totalCallTimes"`
+	TotalInvokeTimes int `json:"totalInvokeTimes"`
 }
 
 // Structure definition for service
@@ -344,7 +350,7 @@ func (t *serviceChaincode) registerUser(stub shim.ChaincodeStubInterface, args [
 	}
 
 	// register user
-	user := &user{new_name, new_intro, new_add, 1}
+	user := &user{new_name, new_intro, new_add, 1, 0, 0, 0}
 	userJSONasBytes, err := json.Marshal(user)
 	if err != nil {
 		return shim.Error(err.Error())
@@ -414,7 +420,16 @@ func (t *serviceChaincode) queryUser(stub shim.ChaincodeStubInterface, args []st
 	} else if userAsBytes == nil {
 		return shim.Error("This user does not exist: " + user_name)
 	}
-
+	var userJson user
+	err = json.Unmarshal(userAsBytes, &userJson)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	userJson = t.calcContribution(userJson)
+	userAsBytes, err = json.Marshal(userJson)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
 	// return user info
 	return shim.Success(userAsBytes)
 }
@@ -491,7 +506,11 @@ func (t *serviceChaincode) registerService(stub shim.ChaincodeStubInterface, arg
 		return shim.Error(err.Error())
 	}
 	err = t.saveServiceByUserName(stub, user_name, service_name, serviceJSONasBytes)
-
+	userJSON.TotalService = userJSON.TotalService + 1
+	err = t.updateUser(userJSON, stub)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
 	return shim.Success([]byte("Service register success."))
 }
 
@@ -671,7 +690,7 @@ func (t *serviceChaincode) editService(stub shim.ChaincodeStubInterface, args []
 	resource = args[3]
 	priceStr = args[4]
 	price, ok := big.NewInt(0).SetString(priceStr, 10)
-	if !ok{
+	if !ok {
 		return shim.Error("5th args must be intefer")
 	}
 
@@ -857,7 +876,11 @@ func (t *serviceChaincode) createMashup(stub shim.ChaincodeStubInterface, args [
 		return shim.Error(err.Error())
 	}
 	err = t.saveServiceByUserName(stub, user_name, mashup_name, serviceJSONasBytes)
-
+	userJSON.TotalService = userJSON.TotalService + 1
+	err = t.updateUser(userJSON, stub)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
 	return shim.Success([]byte("Mashup register success."))
 }
 
@@ -1151,6 +1174,11 @@ func (t *serviceChaincode) callService(stub shim.ChaincodeStubInterface, args []
 		return shim.Error("Save buy record failed: " + err.Error())
 	}
 	err = t.saveCallTimesByServiceName(stub, service_name, record_key, recordJson)
+	user_data.TotalCallTimes = user_data.TotalCallTimes + int(call_times.Int64())
+	err = t.updateUser(user_data, stub)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
 	return shim.Success(nil)
 }
 
@@ -1333,5 +1361,39 @@ func (t *serviceChaincode) reduceCallTime(stub shim.ChaincodeStubInterface, args
 	if err != nil {
 		return shim.Error("Save reduce info failed : " + err.Error())
 	}
+	user_data.TotalInvokeTimes = user_data.TotalInvokeTimes + int(reduce_time.Int64())
+	err = t.updateUser(user_data, stub)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
 	return shim.Success(nil)
+}
+
+func (t *serviceChaincode) calcContribution(serviceUser user) user {
+	totalService := float64(serviceUser.TotalService)
+	totalInvokeTimes := float64(serviceUser.TotalInvokeTimes)
+	totalCallTimes := float64(serviceUser.TotalCallTimes)
+	if totalService == 0 {
+		serviceUser.Contribution = math.Log(totalService + 1)
+	} else {
+		serviceUser.Contribution = math.Log(totalService+1) +  L*(totalInvokeTimes/totalService) + R*(totalCallTimes/totalService)
+	}
+	return serviceUser
+}
+
+func (t *serviceChaincode) updateUser(serviceUser user, stub shim.ChaincodeStubInterface) error {
+	userKey := UserPrefix + serviceUser.Name
+	userJSONasBytes, err := json.Marshal(serviceUser)
+	if err != nil {
+		return err
+	}
+	err = stub.PutState(userKey, userJSONasBytes)
+	if err != nil {
+		return err
+	}
+	err = stub.PutState(UserPrefix+serviceUser.Address, userJSONasBytes)
+	if err != nil {
+		return err
+	}
+	return nil
 }
